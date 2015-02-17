@@ -31,9 +31,6 @@ node_modules
 build
 chibi-scheme
 chibi-scheme.tgz
-chibi.js
-chibi.js.mem
-chibi.data
 
 # Backup copies
 *~
