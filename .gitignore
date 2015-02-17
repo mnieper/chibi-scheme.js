@@ -26,3 +26,14 @@ node_modules
 
 # Users Environment Variables
 .lock-wscript
+
+# Files and directories created during build process
+build
+chibi-scheme
+chibi-scheme.tgz
+chibi.js
+chibi.js.mem
+chibi.data
+
+# Backup copies
+*~
