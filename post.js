@@ -1,2 +1,2 @@
-Module['resume'] = Module.cwrap('resume', 'void', []);
+Module['resume'] = Module.cwrap('sexp_resume', 'void', []);
 
