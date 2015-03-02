@@ -3,12 +3,12 @@
 rm -rf build
 
 if [ ! -d chibi-scheme ] ; then
-  hg clone  https://code.google.com/r/marcnieper-chibi-scheme/ chibi-scheme;
+  hg clone  https://code.google.com/p/chibi-scheme/ chibi-scheme;
 fi
 
 cd chibi-scheme
 hg pull
-hg update emscripten
+hg update
 
 make dist
 cp chibi-scheme-`cat VERSION`.tgz ../chibi-scheme.tgz
