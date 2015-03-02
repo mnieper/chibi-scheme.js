@@ -7,12 +7,9 @@
     "update": "bin/update.sh",
     "postupdate": "bin/build.sh",
     "prebuild": "if [ ! -d build ]; then bin/update.sh; fi", 
-    "build": "bin/build.sh",
+    "build": "bin/build.sh"
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "author": {
-    "name": "Marc Nieper-Wißkirchen",
-    "email": "marc.nieper@gmail.com"
-  },
+  "author": "Marc Nieper-Wißkirchen <marc.nieper@gmail.com>"
   "license": "BSD-3-Clause"
 }
