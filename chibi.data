@@ -1682,7 +1682,7 @@
   (include-shared "profile")
   (include "profile.scm"))
 ;; app.scm -- unified option parsing and config
-;; Copyright (c) 2012-2013 Alex Shinn.  All rights reserved.
+;; Copyright (c) 2012-2015 Alex Shinn.  All rights reserved.
 ;; BSD-style license: http://synthcode.com/license.txt
 
 ;;> Parses command-line options into a config object.
@@ -1691,17 +1691,33 @@
   (define (parse-value type str)
     (cond
      ((not (string? str))
-      str)
+      (list str #f))
      ((and (pair? type) (eq? 'list (car type)))
-      (map (lambda (x) (parse-value (cadr type) x))
-           (string-split str #\,)))
+      (let ((res (map (lambda (x) (parse-value (cadr type) x))
+                      (string-split str #\,))))
+        (list (map car res) (any string? (map cdr res)))))
      (else
       (case type
-        ((boolean) (not (member str '("#f" "#false" "#F" "#FALSE"))))
-        ((number) (string->number str))
-        ((symbol) (string->symbol str))
-        ((char) (string-ref str 0))
-        (else str)))))
+        ((boolean)
+         (list (not (member str '("#f" "#false" "#F" "#FALSE" "false" "FALSE")))
+               #f))
+        ((number integer real)
+         (let ((n (string->number str)))
+           (cond
+            ((and (eq? type 'integer) (not (integer? n)))
+             (list n "expected an integer"))
+            ((and (eq? type 'real) (not (real? n)))
+             (list n "expected a real number"))
+            (else
+             (list n #f)))))
+        ((symbol)
+         (list (string->symbol str) #f))
+        ((char)
+         (if (not (= 1 (string-length str)))
+             (list #f "expected a single character")
+             (list (string-ref str 0) #f)))
+        (else
+         (list str #f))))))
   (define (lookup-conf-spec conf-spec syms strs)
     (let ((sym (car syms))
           (str (car strs)))
@@ -1738,43 +1754,44 @@
               ((and (pair? (cddr x)) (member `(not ,ch) (car (cddr x))))
                `(not ,x))
               (else (lp (cdr ls))))))))
-  (define (parse-conf-spec str args)
-    (let* ((strs (string-split str #\.))
+  (define (parse-long-option str args fail)
+    (let* ((str+val (string-split str #\= 2))
+           (str (car str+val))
+           (args (if (pair? (cdr str+val)) (cons (cadr str+val) args) args))
+           (strs (string-split str #\.))
            (syms (map string->symbol strs))
            (spec (lookup-conf-spec conf-spec syms strs)))
       (cond
        ((not spec)
-        #f)
+        ;; check for 'no' prefix on boolean
+        (if (not (string-prefix? "no" str))
+            (fail prefix conf-spec (car args) args "unknown option")
+            (let ((res (parse-long-option (substring str 2) args (lambda args #f))))
+              (cond
+               ((not res)
+                (fail prefix conf-spec (car args) args "unknown option"))
+               ((not (boolean? (cdar res)))
+                (error "'no' prefix only valid on boolean options"))
+               (else
+                `((,(caar res) . #f) ,@(cdr res)))))))
        ((and (pair? spec) (eq? 'not (car spec)))
         (cons (cons (append prefix (list (car spec))) #f) args))
-       ((eq? 'boolean (cadr spec))
+       ((and (eq? 'boolean (cadr spec)) (null? (cdr str+val)))
         (cons (cons (append prefix (list (car spec))) #t) args))
        ((null? args)
-        (error "missing argument to option " str))
+        (fail prefix conf-spec (car args) args "missing argument to option"))
        (else
-        (cons (cons (append prefix syms) (parse-value (cadr spec) (car args)))
-              (cdr args))))))
-  (define (parse-long-option str args)
-    (let* ((str+val (string-split str #\= 2))
-           (str (car str+val))
-           (args2 (if (pair? (cdr str+val)) (cons (cadr str+val) args) args)))
-      (or (parse-conf-spec str args2)
-          (and (string-prefix? "no-" str)
-               (let ((res (parse-long-option (substring str 3) args)))
-                 (cond
-                  ((not res)
-                   #f)
-                  ((not (boolean? (cdar res)))
-                   (error "'no-' prefix only valid on boolean options"))
-                  (else
-                   `(((,@prefix ,(caar res)) . ,(not (cdar res)))
-                     ,@(cdr res)))))))))
-  (define (parse-short-option str args)
+        (let ((val+err (parse-value (cadr spec) (car args))))
+          (if (cadr val+err)
+              (fail prefix conf-spec (car args) args (cadr val+err))
+              (cons (cons (append prefix syms) (car val+err))
+                    (cdr args))))))))
+  (define (parse-short-option str args fail)
     (let* ((ch (string-ref str 0))
            (x (lookup-short-option ch conf-spec)))
       (cond
        ((not x)
-        #f)
+        (fail prefix conf-spec (car args) args "unknown option"))
        ((and (pair? x) (eq? 'not (car x)))
         (cons (cons (append prefix (list (car (cadr x)))) #f)
               (if (= 1 (string-length str))
@@ -1786,17 +1803,18 @@
                   args
                   (cons (string-append "-" (substring str 1)) args))))
        ((> (string-length str) 1)
-        (cons (cons (append prefix (list (car x)))
-                    (parse-value (cadr x) (substring str 1)))
-              args))
+        (let ((val+err (parse-value (cadr x) (substring str 1))))
+          (if (cadr val+err)
+              (fail prefix conf-spec (car args) args (cadr val+err))
+              (cons (cons (append prefix (list (car x))) (car val+err))
+                    args))))
        ((null? args)
-        (error "missing argument to option " x))
+        (fail prefix conf-spec (car args) args "missing argument to option"))
        (else
         (cons (cons (append prefix (list (car x))) (car args)) (cdr args))))))
-  (or (if (eqv? #\- (string-ref (car args) 1))
-          (parse-long-option (substring (car args) 2) (cdr args))
-          (parse-short-option (substring (car args) 1) (cdr args)))
-      (fail prefix conf-spec (car args) args)))
+  (if (eqv? #\- (string-ref (car args) 1))
+      (parse-long-option (substring (car args) 2) (cdr args) fail)
+      (parse-short-option (substring (car args) 1) (cdr args) fail)))
 
 (define (parse-options prefix conf-spec orig-args fail)
   (let lp ((args orig-args)
@@ -1821,9 +1839,9 @@
           (else (reverse (cdr (reverse  prefix))))))
   (let ((fail (if (pair? o)
                   (car o)
-                  (lambda (prefix spec opt args)
-                    ;; TODO: search for closest option
-                    (error "unknown option: " opt)))))
+                  (lambda (prefix spec opt args reason)
+                    ;; TODO: search for closest option in "unknown" case
+                    (error reason opt)))))
     (cond
      ((null? spec)
       (error "no procedure in application spec"))
@@ -1832,7 +1850,7 @@
         ((@)
          (let* ((new-opt-spec (cadr (car spec)))
                 (new-fail
-                 (lambda (new-prefix new-spec opt args)
+                 (lambda (new-prefix new-spec opt args reason)
                    (parse-option (prev-prefix prefix) opt-spec args fail)))
                 (cfg+args (parse-options prefix new-opt-spec args new-fail))
                 (config (conf-append (car cfg+args) config))
@@ -6398,13 +6416,12 @@
 (define (flag-clear a b) (bitwise-and a (bitwise-not b)))
 
 (define (char-set-ci cset)
-  (let ((res (char-set)))
-    (char-set-for-each
-     (lambda (ch)
-       (char-set-adjoin! res (char-upcase ch))
-       (char-set-adjoin! res (char-downcase ch)))
-     cset)
-    res))
+  (char-set-fold
+   (lambda (ch res)
+     (char-set-adjoin! (char-set-adjoin! res (char-upcase ch))
+                       (char-downcase ch)))
+   (char-set)
+   cset))
 
 (define (make-char-state ch flags next)
   (if (flag-set? flags ~ci?)
@@ -6895,6 +6912,7 @@
       ((numeric num digit) %char-set:digit)
       ((alphanumeric alphanum alnum) %char-set:letter+digit)
       ((punctuation punct) %char-set:punctuation)
+      ((symbol) %char-set:symbol)
       ((graphic graph) %char-set:graphic)
       ((word-constituent) %char-set:word-constituent)
       ((whitespace white space) %char-set:whitespace)
@@ -6917,6 +6935,7 @@
       ((numeric num digit) char-set:digit)
       ((alphanumeric alphanum alnum) char-set:letter+digit)
       ((punctuation punct) char-set:punctuation)
+      ((symbol) char-set:symbol)
       ((graphic graph) char-set:graphic)
       ((word-constituent) char-set:word-constituent)
       ((whitespace white space) char-set:whitespace)
@@ -6951,7 +6970,8 @@
            (or (string? (car sre))
                (memq (car sre)
                      '(char-set / char-range & and ~ complement - difference))
-               (and (memq (car sre) '(|\|| or))
+               (and (memq (car sre)
+                          '(|\|| or w/case w/nocase w/unicode w/ascii))
                     (every char-set-sre? (cdr sre)))))))
 
 (define (valid-sre? x)
@@ -6960,32 +6980,37 @@
 (define (sre->char-set sre . o)
   (let ((flags (if (pair? o) (car o) ~none)))
     (define (->cs sre) (sre->char-set sre flags))
+    (define (maybe-ci sre)
+      (if (flag-set? flags ~ci?) (char-set-ci sre) sre))
     (cond
      ((lookup-char-set sre flags))
-     ((char-set? sre) (char-set-ci sre))
-     ((char? sre) (char-set-ci (char-set sre)))
+     ((char-set? sre) (maybe-ci sre))
+     ((char? sre) (maybe-ci (char-set sre)))
      ((string? sre)
       (if (= 1 (string-length sre))
-          (string->char-set sre)
+          (maybe-ci (string->char-set sre))
           (error "only single char strings can be char-sets")))
      ((pair? sre)
       (if (string? (car sre))
-          (string->char-set (car sre))
+          (maybe-ci (string->char-set (car sre)))
           (case (car sre)
-            ((char-set) (string->char-set (cadr sre)))
+            ((char-set) (maybe-ci (string->char-set (cadr sre))))
             ((/ char-range)
              (->cs
               `(or ,@(map (lambda (x)
-                            (char-set-ci
-                             (ucs-range->char-set
-                              (char->integer (car x))
-                              (+ 1 (char->integer (cdr x))))))
+                            (ucs-range->char-set
+                             (char->integer (car x))
+                             (+ 1 (char->integer (cdr x)))))
                           (sre-flatten-ranges (cdr sre))))))
             ((& and) (apply char-set-intersection (map ->cs (cdr sre))))
             ((|\|| or) (apply char-set-union (map ->cs (cdr sre))))
             ((~ complement) (char-set-complement (->cs `(or ,@(cdr sre)))))
             ((- difference) (char-set-difference (->cs (cadr sre))
                                                  (->cs `(or ,@(cddr sre)))))
+            ((w/case) (sre->char-set (cadr sre) (flag-clear flags ~ci?)))
+            ((w/nocase) (sre->char-set (cadr sre) (flag-join flags ~ci?)))
+            ((w/ascii) (sre->char-set (cadr sre) (flag-join flags ~ascii?)))
+            ((w/unicode) (sre->char-set (cadr sre) (flag-clear flags ~ascii?)))
             (else (error "invalid sre char-set" sre)))))
      (else (error "invalid sre char-set" sre)))))
 
@@ -7269,6 +7294,18 @@
        (reverse (if (< from end) (cons (substring str from end) a) a)))
      start
      end)))
+
+(define (regexp-partition rx str . o)
+  (let ((start (if (pair? o) (car o) 0))
+        (end (if (and (pair? o) (pair? (cdr o))) (cadr o) (string-length str))))
+    (define (kons from md str a)
+      (let ((left (substring str from (regexp-match-submatch-start md 0))))
+        (cons (regexp-match-submatch md 0) (cons left a))))
+    (define (final from md str a)
+      (if (or (< from end) (null? a))
+          (cons (substring str from end) a)
+          a))
+    (reverse (regexp-fold rx kons '() str final start end))))
 
 (define (regexp-replace rx str subst . o)
   (let* ((start (if (and (pair? o) (car o)) (car o) 0))
@@ -10425,9 +10462,9 @@
        (cond ((assoc-get (cdr package) 'name)
               => (lambda (x) (and (pair? x) x)))
              ((assq 'library (cdr package))
-              => (lambda (x) (library-name (cdr x))))
+              => (lambda (x) (library-name x)))
              ((assq 'progam (cdr package))
-              => (lambda (x) (program-name (cdr x))))
+              => (lambda (x) (program-name x)))
              (else #f))))
 
 (define (package-email pkg)
@@ -20503,7 +20540,7 @@ div#footer {padding-bottom: 50px}
   (export regexp regexp? valid-sre? rx regexp->sre char-set->sre
           regexp-matches regexp-matches? regexp-search
           regexp-replace regexp-replace-all
-          regexp-fold regexp-extract regexp-split
+          regexp-fold regexp-extract regexp-split regexp-partition
           regexp-match? regexp-match-count
           regexp-match-submatch regexp-match-submatch/list
           regexp-match-submatch-start regexp-match-submatch-end
@@ -20543,6 +20580,8 @@ div#footer {padding-bottom: 50px}
         (char-set-intersection char-set:ascii char-set:letter+digit))
       (define %char-set:punctuation
         (char-set-intersection char-set:ascii char-set:punctuation))
+      (define %char-set:punctuation
+        (char-set-intersection char-set:ascii char-set:symbol))
       (define %char-set:graphic
         (char-set-intersection char-set:ascii char-set:graphic))
       (define %char-set:whitespace
@@ -20569,7 +20608,7 @@ div#footer {padding-bottom: 50px}
       (define (string-start-arg s o)
         (if (pair? o) (string-index->offset s (car o)) 0))
       (define (string-end-arg s o)
-        (if (pair? o) (string-index->offset (car o)) (string-length s)))
+        (if (pair? o) (string-index->offset s (car o)) (string-length s)))
       (define string-cursor=? =)
       (define string-cursor<? <)
       (define string-cursor<=? <=)
@@ -26312,7 +26351,7 @@ div#footer {padding-bottom: 50px}
   (let ((env (if (pair? o) (car o) (make-environment)))
         (meta (module-meta-data mod))
         (dir (module-name-prefix name)))
-    (define (load-modules files extension fold?)
+    (define (load-modules files extension fold? . o)
       (for-each
        (lambda (f)
          (let ((f (string-append dir f extension)))
@@ -26325,6 +26364,7 @@ div#footer {padding-bottom: 50px}
                            (load in env)))
                         (else
                          (load path env)))))
+            ((and (pair? o) (car o)) ((car o)))
             (else (error "couldn't find include" f)))))
        files))
     ;; catch cyclic references
@@ -26364,6 +26404,9 @@ div#footer {padding-bottom: 50px}
               (load-modules (cdr x) "" #t))
              ((include-shared)
               (load-modules (cdr x) *shared-object-extension* #f))
+             ((include-shared-optionally)
+              (load-modules (list (cadr x)) *shared-object-extension* #f
+                            (lambda () (load-modules (cddr x) "" #f))))
              ((body begin)
               (for-each (lambda (expr) (eval expr env)) (cdr x)))
              ((error)
@@ -26537,6 +26580,7 @@ div#footer {padding-bottom: 50px}
 (define-meta-primitive include)
 (define-meta-primitive include-ci)
 (define-meta-primitive include-shared)
+(define-meta-primitive include-shared-optionally)
 (define-meta-primitive body)
 (define-meta-primitive begin)
 
